@@ -71,8 +71,10 @@ regex==2026.1.15
 requests==2.32.5
 ruamel.yaml==0.19.1
 safetensors==0.7.0
+SAM-2 @ git+https://github.com/facebookresearch/segment-anything-2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
 scikit-image==0.26.0
 scipy==1.17.0
+segment-anything-py==1.0.1
 setuptools==80.9.0
 shapely==2.1.2
 shellingham==1.5.4
