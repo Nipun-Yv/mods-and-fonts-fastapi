@@ -1,7 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import JSONResponse
 from utils.gemini_design_gen import generate_designs, generate_refined_design
-from utils.segmentation import load_sam_model, segment_image
 from utils.font_matcher import match_font, get_available_characters, get_library_info
 import base64
 import os
