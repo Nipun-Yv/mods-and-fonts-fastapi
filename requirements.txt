@@ -6,6 +6,7 @@ annotated-doc==0.0.4
 annotated-types==0.7.0
 antlr4-python3-runtime==4.9.3
 anyio==4.12.1
+asyncpg==0.31.0
 attrs==25.4.0
 bce-python-sdk==0.9.59
 certifi==2026.1.4
