@@ -1,7 +1,8 @@
-from fastapi import File, UploadFile, HTTPException, Form,APIRouter
+from fastapi import File, UploadFile, HTTPException, Form,APIRouter, Header
 from fastapi.responses import JSONResponse
 from utils.font_matcher import match_font, get_available_characters, get_library_info
-from typing import Optional
+from utils.session import get_user_from_session
+from config.db import get_db
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -9,93 +10,116 @@ logger = logging.getLogger(__name__)
 
 router=APIRouter()
 
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel
+
+router = APIRouter()
+
+class QuotaResponse(BaseModel):
+    used: int
+    limit: int
+@router.get("/quota", response_model=QuotaResponse)
+async def get_quota(session_id: str = Header(..., alias="X-Session-ID")):
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Missing session")
+
+    user = await get_user_from_session(session_id)
+    db = await get_db()
+
+    row = await db.fetchrow(
+        """
+        SELECT font_search_count,font_search_limit from users where id=$1
+        """,
+        user["id"]
+    )
+
+    if(not row):
+        raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Font search limit reached. "
+            f"{user['font_search_count']}/{user['font_search_limit']}"
+        )
+        )
+    
+    return {"used": row["font_search_count"], "limit": row["font_search_limit"]}
+
 
 @router.post("/match-font")
 async def match_font_endpoint(
-    file: UploadFile = File(..., description="Image file containing a character"),
-    character: str = Form(..., description="Single character to match (e.g., 'A', 'a', 'B')"),
-    top_k: Optional[int] = Form(5, description="Number of top matches to return (default: 5)"),
-    include_images: Optional[bool] = Form(False, description="Include font face preview images (default: False)")
-):
-    """
-    Match a font based on a character in an image using Vision Transformer.
-    
-    This endpoint uses state-of-the-art Vision Transformer (ViT) model to analyze
-    the character in the image and find the best matching fonts from the library.
-    
-    Returns the top matching fonts with similarity scores.
-    """
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="File must be an image"
-        )
-    
-    if not character or len(character) != 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Character must be a single character (e.g., 'A', 'a', 'B')"
-        )
-    
-    if top_k < 1 or top_k > 20:
-        raise HTTPException(
-            status_code=400,
-            detail="top_k must be between 1 and 20"
-        )
-    
-    try:
-        image_data = await file.read()
-        max_size = 10 * 1024 * 1024 
-        if len(image_data) > max_size:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Image file too large. Maximum size is {max_size / (1024*1024)}MB"
+        file: UploadFile = File(...),
+        character: str = Form(...),
+        top_k: int = Form(5),
+        include_images: bool = Form(False),
+        session_id: str = Header(..., alias="X-Session-ID")
+    ):
+        if not file.content_type or not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="File must be an image")
+
+        if len(character) != 1:
+            raise HTTPException(status_code=400, detail="Character must be a single character")
+
+        if not 1 <= top_k <= 20:
+            raise HTTPException(status_code=400, detail="top_k must be between 1 and 20")
+
+        try:
+            user = await get_user_from_session(session_id)
+            db = await get_db()
+
+            # ───────── ATOMIC QUOTA CHECK + INCREMENT ─────────
+            row = await db.fetchrow(
+                """
+                UPDATE users
+                SET font_search_count = font_search_count + 1
+                WHERE id = $1
+                AND font_search_count < font_search_limit
+                RETURNING font_search_count, font_search_limit
+                """,
+                user["id"]
             )
-        
-        matches = match_font(
-            image_bytes=image_data,
-            character=character,
-            top_k=top_k,
-            enhance=True,
-            include_images=include_images
-        )
-        
-        return JSONResponse(content={
-            "character": character,
-            "original_filename": file.filename,
-            "matches": matches,
-            "total_matches": len(matches),
-            "model": "Vision Transformer (ViT-B/16)",
-            "message": f"Successfully matched {len(matches)} fonts for character '{character}'"
-        })
-        
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
-    except RuntimeError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Font matching service not available: {str(e)}"
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error matching font: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing image: {str(e)}"
-        )
+
+            if not row:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Font search limit reached. "
+                        f"{user['font_search_count']}/{user['font_search_limit']}"
+                    )
+                )
+
+            image_data = await file.read()
+            if len(image_data) > 10 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+
+            matches = match_font(
+                image_bytes=image_data,
+                character=character,
+                top_k=top_k,
+                enhance=True,
+                include_images=include_images
+            )
+
+            logger.info(
+                f"Font search count: {row['font_search_count']}/{row['font_search_limit']}"
+            )
+
+            return {
+                "character": character,
+                "original_filename": file.filename,
+                "matches": matches,
+                "total_matches": len(matches),
+                "message": f"Successfully matched {len(matches)} fonts"
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(str(e))
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/font-library/info")
 async def get_font_library_info():
-    """
-    Get information about the font library.
-    
-    Returns statistics about available fonts, characters, and the model used.
-    """
     try:
         info = get_library_info()
         return JSONResponse(content={
@@ -118,11 +142,6 @@ async def get_font_library_info():
 
 @router.get("/font-library/characters")
 async def get_available_chars():
-    """
-    Get list of characters available for matching.
-    
-    Returns all characters that are available in the font library.
-    """
     try:
         chars = get_available_characters()
         return JSONResponse(content={
